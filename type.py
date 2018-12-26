@@ -15,3 +15,8 @@ INT_TYPE = Type('int')
 BOOL_TYPE = Type('bool')
 STRING_TYPE = Type('string')
 VOID_TYPE = Type('void')
+
+def get_size(type):
+    return {INT_TYPE: 4,
+     BOOL_TYPE: 4,
+     STRING_TYPE: 8}[type]
