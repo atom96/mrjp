@@ -14,29 +14,40 @@ grammar = r"""
 
     program: top_def+                         -> program
 
-    top_def: type_ id "(" arg? ")" block      -> top_def
+    ?top_def: fun_def 
+             | "class" id "{" cls_def* "}"               -> cls_def 
+             | "class" id "extends" id "{" cls_def* "}"  -> cls_extends_def
+    
+    ?cls_def: fun_def | field 
+    
+    fun_def: type_ id "(" arg? ")" block      -> fun_def
 
     arg: type_ id ( "," type_ id )*           -> arg
 
+    field: type_ id ";"                       -> field
+
     block: "{" stmt* "}"                      -> block
 
-    ?stmt: ";"
-        | block                               -> s_block
-        | type_ item ( "," item )* ";"        -> s_decl
-        | id "=" _expr ";"                    -> s_asg
-        | id "++" ";"                         -> s_pp
-        | id "--" ";"                         -> s_mm
+    ?stmt: ";"                                -> s_empty
         | "return" _expr ";"                  -> s_ret_val
         | "return" ";"                        -> s_ret_void
+        | block                               -> s_block
+        | _expr "=" _expr ";"                 -> s_asg
+        | _expr "++" ";"                      -> s_pp
+        | _expr "--" ";"                      -> s_mm
         | "if" "(" _expr ")" stmt             -> s_if
         | "if" "(" _expr ")" stmt "else" stmt -> s_if_else
         | "while" "(" _expr ")" stmt          -> s_while
+        | stmt2
+        
+    ?stmt2: type_ item ( "," item )* ";"        -> s_decl
         | _expr ";"                           -> s_expr
 
     type_: "int"     -> t_int
         | "string"   -> t_string
         | "boolean"  -> t_bool
         | "void"     -> t_void
+        | id         -> t_class
 
     item: id                                  -> decl
         | id "=" _expr                        -> decl
@@ -47,15 +58,23 @@ grammar = r"""
     ?expr2: expr2 rel_op expr3 -> e_op         | expr3
     ?expr3: expr3 add_op expr4 -> e_op         | expr4
     ?expr4: expr4 mul_op expr5 -> e_op         | expr5
-    ?expr5: "-"  expr6         -> e_neg
-        |  "!"  expr6          -> e_not
-        | expr6
-    ?expr6: id                                  -> p_var
+    ?expr5: "(" id ")" expr5   -> e_cast       | expr6    
+    ?expr6: "new" id           -> e_new        | expr7
+    
+    ?expr7: "-"  expr7         -> e_neg
+        |  "!"  expr7          -> e_not
+        | expr8
+    
+    ?expr8: id                                  -> p_var
         | INT                                   -> p_int
         | "true"                                -> p_true
         | "false"                               -> p_false
-        | id "(" ( _expr ( "," _expr )* )? ")"  -> call
+        | "null"                                -> p_null
         | ESCAPED_STRING                        -> p_string
+        | expr8 "." id                          -> e_cls_attr
+        | id "(" ( _expr ( "," _expr )* )? ")"  -> call
+        | expr8 "." id "(" ( _expr ( "," _expr )* )? ")"  -> e_cls_call
+        
         |"(" _expr ")"
 
     add_op: "+" -> op_plus
@@ -74,7 +93,7 @@ grammar = r"""
 
     ?id: CNAME -> string_value
 
-    COMMENT     :  "/*" /(.|\\n|\\r)+/ "*/" |  "//" /(.)+/ NEWLINE | "#" /(.)+/ NEWLINE
+    COMMENT     :  "/*" /(.|\n|\r)+/ "*/" |  "//" /[^\n]/* | "#" /[^\n]/*
     %import common.NEWLINE
     %import common.WS
     %import common.CNAME
@@ -85,109 +104,118 @@ grammar = r"""
     %ignore WS
     """
 
-class MyTransformer(lark.Transformer):
-    def string_value(selfself, params):
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
 
+class MyTransformer(lark.Transformer):
+
+    @lark.v_args(meta=True)
+    def string_value(self, params, meta):
         return params[0].value
 
-    def program(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def program(self, params, meta):
 
-        return Program(params)
+        classes = []
+        functions = []
 
-    def top_def(self, params):
+        for param in params:
+            if param.__class__.__name__ == 'FunDef':
+                functions.append(param)
+            else:
+                classes.append(param)
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+        return Program(functions, classes)
 
+    @lark.v_args(meta=True)
+    def field(self, params, meta):
+        result = Field(params[1], params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
+
+    @lark.v_args(meta=True)
+    def arg(self, params, meta):
+        args = []
+        for i in range(0, len(params), 2):
+            args.append((params[i], params[i + 1]))
+
+        result = Args(args)
+        result.line = meta.line
+        result.column = meta.column
+        return result
+
+    @lark.v_args(meta=True)
+    def block(self, params, meta):
+        result = Block(params)
+        result.line = meta.line
+        result.column = meta.column
+        return result
+
+    @lark.v_args(meta=True)
+    def decl(self, params, meta):
+        return params
+
+    # ==== Definitions ====
+    @lark.v_args(meta=True)
+    def fun_def(self, params, meta):
         if len(params) == 3:
             d_type, d_name, d_block = params
             d_args = Args([])
         else:
             d_type, d_name, d_args, d_block = params
-        return TopDef(d_type, d_name, d_args, d_block)
+        result = FunDef(d_type, d_name, d_args, d_block)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def arg(self, params):
+    def cls_def(self, params):
+        name = params[0]
+        fields = []
+        methods = []
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+        for param in params[1:]:
+            if param.__class__.__name__ == 'Field':
+                fields.append(param)
+            elif param.__class__.__name__ == 'FunDef':
+                methods.append(param)
+            else:
+                print("Unknown param", param)
+        result = ClassDef(name, fields, methods)
+        return result
 
-        args = []
-        for i in range(0, len(params), 2):
-            args.append((params[i], params[i + 1]))
+    @lark.v_args(meta=True)
+    def cls_extends_def(self, params, meta):
+        name = params[0]
+        parent = params[1]
 
-        return Args(args)
+        cls = self.cls_def([name] + params[2:])
+        cls.parent = parent
+        result = cls
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def block(self, params):
+    # ==== Statements ====
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def s_empty(self, params, meta):
+        result = EmptyStmt()
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return Block(params)
-
-    def s_ret_void(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return RetVoidStmt()
+    @lark.v_args(meta=True)
+    def s_ret_void(self, params, meta):
+        result = RetVoidStmt()
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
     def s_block(self, params):
+        result = BlockStmt(params[0])
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return BlockStmt(params[0])
-
-    def s_decl(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
+    @lark.v_args(meta=True)
+    def s_decl(self, params, meta):
         variables = []
         type = params[0]
         for param in params[1:]:
@@ -196,487 +224,311 @@ class MyTransformer(lark.Transformer):
             else:
                 variables.append(VarDef(type, param[0], param[1]))
 
-        return DeclStmt(params[0], variables)
+        result = DeclStmt(params[0], variables)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def s_asg(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def s_asg(self, params, meta):
+        result = AsgStmt(params[0], params[1])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return AsgStmt(params[0], params[1])
+    @lark.v_args(meta=True)
+    def s_pp(self, params, meta):
+        result = PPStmt(params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def s_pp(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def s_mm(self, params, meta):
+        result = MMStrmt(params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return PPStmt(params[0])
+    @lark.v_args(meta=True)
+    def s_ret_val(self, params, meta):
+        result = RetValueStmt(params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def s_mm(self, params):
+    @lark.v_args(meta=True)
+    def s_if(self, params, meta):
+        result = IfStmt(params[0], params[1])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def s_if_else(self, params, meta):
+        result = IfElseStmt(params[0], params[1], params[2])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return MMStrmt(params[0])
+    @lark.v_args(meta=True)
+    def s_while(self, params, meta):
+        result = WhileStmt(params[0], params[1])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def s_ret_val(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def s_expr(self, params, meta):
+        result = ExprStmt(params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return RetValueStmt(params[0])
+    # ==== TYPES ====
 
-    def s_if(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return IfStmt(params[0], params[1])
-
-    def s_if_else(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return IfElseStmt(params[0], params[1], params[2])
-
-    def s_while(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return WhileStmt(params[0], params[1])
-
-    def s_expr(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return ExprStmt(params[0])
-
-    def t_int(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
+    @lark.v_args(meta=True)
+    def t_int(self, params, meta):
         return INT_TYPE
 
-    def t_bool(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
+    @lark.v_args(meta=True)
+    def t_bool(self, params, meta):
         return BOOL_TYPE
 
-    def t_void(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
+    @lark.v_args(meta=True)
+    def t_void(self, params, meta):
         return VOID_TYPE
 
-    def t_string(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
+    @lark.v_args(meta=True)
+    def t_string(self, params, meta):
         return STRING_TYPE
 
+    @lark.v_args(meta=True)
+    def t_class(self, params, meta):
+        return Type(params[0])
 
-    def decl(self, params):
-        return params
+    # ==== Expressions ====
 
+    @lark.v_args(meta=True)
+    def e_or(self, params, meta):
+        result = ExpOperator(OrOperator(params[0], params[1]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def e_or(self, params):
+    @lark.v_args(meta=True)
+    def e_and(self, params, meta):
+        result = ExpOperator(AndOperator(params[0], params[1]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return ExpOperator(OrOperator(params[0], params[1]))
-
-    def e_and(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return ExpOperator(AndOperator(params[0], params[1]))
-
-    def e_op(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
+    @lark.v_args(meta=True)
+    def e_op(self, params, meta):
         param1, operator, param2 = params
         operator.param1 = param1
         operator.param2 = param2
-        return ExpOperator(params[1])
+        result = ExpOperator(params[1])
 
-    def e_neg(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+        return result
 
-        return ExpOperator(NegOperator(params[0]))
+    @lark.v_args(meta=True)
+    def e_neg(self, params, meta):
+        result = ExpOperator(NegOperator(params[0]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def e_not(self, params):
+    @lark.v_args(meta=True)
+    def e_not(self, params, meta):
+        result = ExpOperator(NotOperator(params[0]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def p_var(self, params, meta):
+        result = ExpVariable(params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpOperator(NotOperator(params[0]))
+    @lark.v_args(meta=True)
+    def p_true(self, params, meta):
+        result = ExpLitTrue()
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def p_var(self, params):
+    @lark.v_args(meta=True)
+    def p_false(self, params, meta):
+        result = ExpLitFalse()
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def call(self, params, meta):
+        result = ExpApp(params[0], params[1:])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpVariable(params[0])
+    @lark.v_args(meta=True)
+    def p_string(self, params, meta):
+        result = ExpLitString(params[0])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def p_true(self, params):
+    @lark.v_args(meta=True)
+    def p_int(self, params, meta):
+        result = ExpLitInt(int(params[0]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def p_null(self, params, meta):
+        result = ExpLitNull()
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpLitTrue()
+    @lark.v_args(meta=True)
+    def e_new(self, params, meta):
+        result = ExpNew(Type(params[0]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def p_false(self, params):
+    @lark.v_args(meta=True)
+    def e_cls_call(self, params, meta):
+        result = ExpMethodCall(params[0], params[1], params[2:])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def e_cls_attr(self, params, meta):
+        result = ExpAttribute(params[0], params[1])
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpLitFalse()
+    @lark.v_args(meta=True)
+    def e_cast(self, params, meta):
+        result = ExpCast(params[1], Type(params[0]))
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def call(self, params):
+    # ==== Operators ====
+    @lark.v_args(meta=True)
+    def op_plus(self, params, meta):
+        result = PlusOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def op_minus(self, params, meta):
+        result = MinusOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpApp(params[0], params[1:])
+    @lark.v_args(meta=True)
+    def op_times(self, params, meta):
+        result = TimesOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def p_string(self, params):
+    @lark.v_args(meta=True)
+    def op_div(self, params, meta):
+        result = DivisionOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def op_mod(self, params, meta):
+        result = ModOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpLitString(params[0])
+    @lark.v_args(meta=True)
+    def op_lt(self, params, meta):
+        result = LTOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def p_int(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def op_le(self, params, meta):
+        result = LEOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return ExpLitInt(int(params[0]))
+    @lark.v_args(meta=True)
+    def op_gt(self, params, meta):
+        result = GTOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-    def op_plus(self, params):
+    @lark.v_args(meta=True)
+    def op_ge(self, params, meta):
+        result = GEOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
+    @lark.v_args(meta=True)
+    def op_eq(self, params, meta):
+        result = EQOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
-        return PlusOperator(None, None)
-
-    def op_minus(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return MinusOperator(None, None)
-
-    def op_times(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return TimesOperator(None, None)
-
-    def op_div(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return DivisionOperator(None, None)
-
-    def op_mod(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return ModOperator(None, None)
-
-    def op_lt(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return LTOperator(None, None)
-
-    def op_le(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return LEOperator(None, None)
-
-    def op_gt(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return GTOperator(None, None)
-
-    def op_ge(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return GEOperator(None, None)
-
-    def op_eq(self, params):
-        #
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return EQOperator(None, None)
-
-    def op_ne(self, params):
-
-        # try:
-        #     print(params[0].pos_in_stream)
-        #    #)
-        #     print(params[0].line)
-        #     print(params[0].column)
-        # except:
-        #     pass
-
-        return NEOperator(None, None)
+    @lark.v_args(meta=True)
+    def op_ne(self, params, meta):
+        result = NEOperator(None, None)
+        result.line = meta.line
+        result.column = meta.column
+        return result
 
 
-program = """
-int main() {
-    int x = 5;
-    while(x > 0){
-        printString("xD");  
-        x--;
-    }
-    printString(x("Hello"));
-    return 0;
-}
-string x(string d){
-      return d + " 42";
-}
+if __name__ == '__main__':
+    import logging
 
+    logging.basicConfig(level=logging.DEBUG)
 
-"""
+    path = sys.argv[1]
 
-y =  """
-/* Test boolean operators. */
+    with open(path) as f:
+        try:
+            program = lark.Lark(grammar, start="program", parser='lalr', propagate_positions=True, debug=True).parse(
+                f.read())
+        except FileNotFoundError as e:
+            print(e)
+            exit(1)
+        except lark.exceptions.LarkError as e:
+            line = getattr(e, 'line', 'undefined')
+            column = getattr(e, 'column', 'undefined')
 
-void xd(int x, string d) {
-    return;
-}
+            print("Syntax error at line {} column {}".format(line, column))
+            exit(1)
+        program = MyTransformer().transform(program)
+    try:
+        program.check_correctness()
+        asm = program.compile()
+        with open(sys.argv[1][:-4] + '.s', 'w') as f:
+            f.write(asm)
 
-int main() {
-  int x;
-  int z;
-  int y = z;
-  
-  5 + 3;
-  
-  printBool(test(-1) && test(0));
-  printBool(test(-2) && test(1));
-  printBool(test(3) && test(-5));
-  printBool(test(234234) && test(21321));
-  printString("||");
-  printBool(test(-1) || test(0));
-  printBool(test(-2) || test(1));
-  printBool(test(3) || test(-5));
-  printBool(test(234234) || test(21321));
-  printString("!");
-  printBool(true);
-  printBool(false);
-  return 0 ;
-
-}
-
-void printBool(boolean b) {
-  if (!b) {
-    printString("false");
-  } else {
-    printString("true");
- }
- return;
-}
-
-boolean test(int i) {
-  printInt(i);
-  return i > 0;
-}
-"""
-
-program = MyTransformer().transform(lark.Lark(grammar, start="program").parse(program))
-program.check_correctness()
-program.compile()
+    except CompilerException as e:
+        print(e)
+        sys.exit(1)

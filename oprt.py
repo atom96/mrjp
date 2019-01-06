@@ -1,15 +1,18 @@
 from abc import ABCMeta, abstractmethod
 
 from compiler import BaseBase, TypeException, RegisterLocation, Counter
-from type import INT_TYPE, BOOL_TYPE, STRING_TYPE
+from type import INT_TYPE, BOOL_TYPE, STRING_TYPE, is_type_matching
 from expr import ExpApp
 
-class OperatorBase(BaseBase):
 
+class OperatorBase(BaseBase):
     __metaclass__ = ABCMeta
 
     def calc_to_register(self, location: RegisterLocation):
         raise NotImplementedError()
+
+    def get_real_value(self):
+        raise AttributeError("Cannot give real value")
 
 
 class TwoParamsOperatorBase(OperatorBase):
@@ -23,13 +26,17 @@ class TwoParamsOperatorBase(OperatorBase):
     def get_type(self, env):
         t1 = self.param1.get_type(env)
 
-        if t1 not in self.ALLOWED_TYPES:
+        if self.ALLOWED_TYPES != 'Any' and t1 not in self.ALLOWED_TYPES:
             raise TypeException(
-                '{} is not allowed type. Operator {} only accepts {}'.format(t1, self.NAME, self.ALLOWED_TYPES))
+                '{} is not allowed type. Operator {} only accepts {}'.format(t1, self.NAME, self.ALLOWED_TYPES), self)
+
         t2 = self.param2.get_type(env)
 
-        if t1 != t2:
-            raise TypeException('{} and {} types mismatch'.format(t1, t2))
+        if self.ALLOWED_TYPES == 'Any':
+            if not (is_type_matching(t1, t2, env) or is_type_matching(t2, t1, env)):
+                raise TypeException('{} and {} types mismatch'.format(t1, t2), self)
+        elif t1 != t2:
+            raise TypeException('{} and {} types mismatch'.format(t1, t2), self)
         return self.RESULT_TYPE
 
 
@@ -41,7 +48,7 @@ class OneParamOperatorBase(OperatorBase):
         t = self.param.get_type(env)
         if t not in self.ALLOWED_TYPES:
             raise TypeException(
-                '{} is not allowed type. Operator {} only accepts {}'.format(t, self.NAME, self.ALLOWED_TYPES))
+                '{} is not allowed type. Operator {} only accepts {}'.format(t, self.NAME, self.ALLOWED_TYPES), self)
         return self.RESULT_TYPE
 
 
@@ -107,7 +114,7 @@ class TwoParamsIntOperator(TwoParamsOperatorBase, IntOperator):
                self.param1.mov_to_register(location) + \
                self.param2.mov_to_register(temp_register) + \
                [
-                   '{} {}, {}'.format(self.MNEMONIC, self.regsiter1, self.regsiter2),
+                   '{} {}, {}'.format(self.MNEMONIC, location, temp_register),
                    'pop {}'.format(temp_register.full_name)
                ]
 
@@ -149,16 +156,24 @@ class PlusOperator(TwoParamsIntOperator):
         else:
             return ExpApp('strConcat', [self.param1, self.param2]).mov_to_register(location)
 
+    def get_real_value(self):
+        return self.param1.get_real_value() + self.param2.get_real_value()
 
 
 class MinusOperator(TwoParamsIntOperator):
     MNEMONIC = 'sub'
     NAME = '-'
 
+    def get_real_value(self):
+        return self.param1.get_real_value() - self.param2.get_real_value()
+
 
 class TimesOperator(TwoParamsIntOperator):
     MNEMONIC = 'imul'
     NAME = '*'
+
+    def get_real_value(self):
+        return self.param1.get_real_value() * self.param2.get_real_value()
 
 
 class DivisionOperator(TwoParamsIntOperator):
@@ -195,6 +210,9 @@ class DivisionOperator(TwoParamsIntOperator):
 
         return result
 
+    def get_real_value(self):
+        return self.param1.get_real_value() // self.param2.get_real_value()
+
 
 class ModOperator(DivisionOperator):
     MNEMONIC = 'div'
@@ -206,37 +224,74 @@ class ModOperator(DivisionOperator):
         result.insert(idx + 1, 'mov eax, edx')
         return result
 
+    def get_real_value(self):
+        return self.param1.get_real_value() % self.param2.get_real_value()
+
 
 class LTOperator(TwoParamsIntToBoolOperator):
     NAME = '<'
     COMPARISON = 'jl'
+
+    def get_real_value(self):
+        return self.param1.get_real_value() < self.param2.get_real_value()
 
 
 class LEOperator(TwoParamsIntToBoolOperator):
     NAME = '<='
     COMPARISON = 'jle'
 
+    def get_real_value(self):
+        return self.param1.get_real_value() <= self.param2.get_real_value()
+
 
 class GTOperator(TwoParamsIntToBoolOperator):
     NAME = '>'
     COMPARISON = 'jg'
+
+    def get_real_value(self):
+        return self.param1.get_real_value() > self.param2.get_real_value()
 
 
 class GEOperator(TwoParamsIntToBoolOperator):
     NAME = '>='
     COMPARISON = 'jge'
 
+    def get_real_value(self):
+        return self.param1.get_real_value() >= self.param2.get_real_value()
+
 
 class EQOperator(TwoParamsIntToBoolOperator):
-    ALLOWED_TYPES = [INT_TYPE, STRING_TYPE, BOOL_TYPE]
+    ALLOWED_TYPES = 'Any'
     NAME = '=='
     COMPARISON = 'je'
 
+    def get_real_value(self):
+        return self.param1.get_real_value() == self.param2.get_real_value()
+
+    def boolean_jmp(self, if_true, if_false):
+        return ['push {}'.format(self.regsiter1.full_name),
+                'push {}'.format(self.regsiter2.full_name)] + \
+               self.param1.mov_to_register(self.regsiter1) + \
+               self.param2.mov_to_register(self.regsiter2) + \
+               [
+                   'cmp {}, {}'.format(self.regsiter1.full_name, self.regsiter2.full_name),
+                   'pop {}'.format(self.regsiter2.full_name),
+                   'pop {}'.format(self.regsiter1.full_name),
+                   '{} {}'.format(EQOperator.COMPARISON, if_true),
+                   'jmp {}'.format(if_false),
+               ]
+
 
 class NEOperator(TwoParamsIntToBoolOperator):
-    ALLOWED_TYPES = [INT_TYPE, STRING_TYPE, BOOL_TYPE]
+    ALLOWED_TYPES = 'Any'
     NAME = '!='
     COMPARISON = 'jne'
+
+    def get_real_value(self):
+        return self.param1.get_real_value() != self.param2.get_real_value()
+
+    def boolean_jmp(self, if_true, if_false):
+        return EQOperator.boolean_jmp(self, if_false, if_true)
 
 
 class NegOperator(OneParamOperatorBase, IntOperator):
@@ -245,6 +300,9 @@ class NegOperator(OneParamOperatorBase, IntOperator):
     def calc_to_register(self, location: RegisterLocation):
         return self.param.mov_to_register(location) + \
                ['neg {}'.format(location)]
+
+    def get_real_value(self):
+        return -self.param.get_real_value()
 
 
 class NotOperator(OneParamOperatorBase, BoolOperator):
@@ -255,6 +313,9 @@ class NotOperator(OneParamOperatorBase, BoolOperator):
 
     def calc_to_register(self, location: RegisterLocation):
         return BoolResultOperator.calc_to_register(self, location)
+
+    def get_real_value(self):
+        return not self.param.get_real_value()
 
 
 class AndOperator(TwoParamsOperatorBase, BoolOperator):
@@ -271,6 +332,9 @@ class AndOperator(TwoParamsOperatorBase, BoolOperator):
     def calc_to_register(self, location: RegisterLocation):
         return BoolResultOperator.calc_to_register(self, location)
 
+    def get_real_value(self):
+        return self.param1.get_real_value() and self.param2.get_real_value()
+
 
 class OrOperator(TwoParamsOperatorBase, BoolOperator):
     NAME = '||'
@@ -285,3 +349,6 @@ class OrOperator(TwoParamsOperatorBase, BoolOperator):
 
     def calc_to_register(self, location: RegisterLocation):
         return BoolResultOperator.calc_to_register(self, location)
+
+    def get_real_value(self):
+        return self.param1.get_real_value() or self.param2.get_real_value()

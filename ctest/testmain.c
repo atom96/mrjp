@@ -1,10 +1,10 @@
 #include <stdio.h>
 
-extern int program();
+extern int top_main();
 
 
 int main() {
-    printf("%d\n", program());
+    top_main();
     return 0;
 }
 
